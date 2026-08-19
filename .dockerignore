@@ -1,0 +1,4 @@
+legacycoreaget
+*.log
+.git
+.env

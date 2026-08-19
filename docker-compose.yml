@@ -1,0 +1,16 @@
+services:
+  legacycoreaget:
+    build:
+      context: ../legacycore
+      dockerfile: ../legacycoreaget/Dockerfile
+    container_name: legacycoreaget
+    restart: unless-stopped
+    ports:
+      - "${LEGACYCOIN_PORT:-8443}:${LEGACYCOIN_PORT:-8443}"
+    env_file:
+      - .env
+    volumes:
+      - wallet-data:/data
+
+volumes:
+  wallet-data:
