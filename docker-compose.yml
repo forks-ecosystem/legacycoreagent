@@ -1,9 +1,9 @@
 services:
-  legacycoreaget:
+  legacycoreagent:
     build:
       context: ../legacycore
-      dockerfile: ../legacycoreaget/Dockerfile
-    container_name: legacycoreaget
+      dockerfile: ../legacycoreagent/Dockerfile
+    container_name: legacycoreagent
     user: "1000:1000"
     restart: unless-stopped
     ports:

@@ -94,7 +94,7 @@ Requires Go 1.26+ and the `legacycore` repository alongside this one:
 
 ```bash
 cd /app/legacycore
-go build -o /app/legacycoreaget/legacycoreaget ./cmd/legacycoreaget/
+go build -o /app/legacycoreagent/legacycoreagent ./cmd/legacycoreagent/
 ```
 
 ## Docker

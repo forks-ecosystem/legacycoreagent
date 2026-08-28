@@ -3,12 +3,12 @@ RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY internal/ internal/
-COPY cmd/legacycoreaget/ cmd/legacycoreaget/
-RUN CGO_ENABLED=0 go build -o /legacycoreaget ./cmd/legacycoreaget/
+COPY cmd/legacycoreagent/ cmd/legacycoreagent/
+RUN CGO_ENABLED=0 go build -o /legacycoreagent ./cmd/legacycoreagent/
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
-COPY --from=builder /legacycoreaget /usr/local/bin/legacycoreaget
+COPY --from=builder /legacycoreagent /usr/local/bin/legacycoreagent
 RUN mkdir -p /data
 EXPOSE 8443
-ENTRYPOINT ["legacycoreaget"]
+ENTRYPOINT ["legacycoreagent"]
