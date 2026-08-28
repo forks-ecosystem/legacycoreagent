@@ -2,9 +2,31 @@
 
 LegacyCore Agent is a lightweight HTTP API service for wallet management in the LegacyCoin ecosystem. It provides seed phrase generation, wallet restore, and wallet information retrieval.
 
+## Prerequisites
+
+This service is built from the **LegacyCore** blockchain source and requires the `legacycore` repository to be cloned next to this one (it is used as the Docker build context):
+
+```
+/app/legacycore/       <- required (blockchain source, build context)
+/app/legacycoreagent/  <- this project
+```
+
+If `legacycore` is not present, the build fails with:
+`unable to prepare context: path "/app/legacycore" not found`
+
+To install (clone + build) the LBTC/LegacyCore node, run the provided setup script:
+
+```bash
+./_git_legacycore.sh
+```
+
+This clones `https://github.com/forks-ecosystem/legacycore.git` into `/app/legacycore`
+and builds `legacycoind` + `legacycoin-cli`.
+
 ## Quick Start
 
 ```bash
+./_git_legacycore.sh   # once: install/clone the LegacyCore node (required)
 docker compose up -d
 ```
 
@@ -85,7 +107,7 @@ Returns a list of all wallet names stored on disk.
 
 ## Build from Source
 
-Requires Go 1.26+ and the `legacycore` repository alongside this one:
+Requires Go 1.26+ and the `legacycore` repository alongside this one (see [Prerequisites](#prerequisites); you can install it with `_git_legacycore.sh`):
 
 ```
 /app/legacycoreagent/
