@@ -6,8 +6,7 @@ services:
     container_name: legacycoreagent
     user: "1000:1000"
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:${LEGACYCOIN_PORT:-8444}:${LEGACYCOIN_PORT:-8444}"
+    network_mode: host
     env_file:
       - .env
     volumes:
