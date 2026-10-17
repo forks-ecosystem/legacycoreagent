@@ -1,2 +1,3 @@
 legacycoreagent
 *.log
+.env.bak*

@@ -1,0 +1,16 @@
+[Unit]
+Description=LegacyCore Agent
+After=network-online.target docker.service legacycoind.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/app/legacycoreagent
+EnvironmentFile=/app/legacycoreagent/.env
+ExecStart=/usr/local/bin/legacycoreagent
+Restart=always
+RestartSec=3
+User=coin
+
+[Install]
+WantedBy=multi-user.target
