@@ -1,0 +1,245 @@
+--- /dev/fd/63	2026-11-12 11:34:22.856060664 +0000
++++ /tmp/agent-build/cmd/legacycoreagent/main.go	2026-11-12 11:33:53.731669765 +0000
+@@ -25,6 +25,11 @@
+ 	rpcPass string
+ 	chains  *txsvc.Manager
+ 	apiKey  string
++	// cookie auth state: .cookie in the node datadir, re-read on mtime change
++	// so a node restart that rotates the cookie is picked up automatically.
++	cookieFile      string
++	cookieModTime   time.Time
++	cookieAuthCache string
+ }
+ 
+ func NewService(dataDir string) *Service {
+@@ -95,6 +100,64 @@
+ 	if s.rpcURL == "" {
+ 		return nil, fmt.Errorf("RPC not configured")
+ 	}
++	conf := s.confAuth()
++	if conf == "" {
++		// No static credentials configured: the node is presumably
++		// cookie-only — go straight to the datadir .cookie.
++		if auth := s.cookieAuth(); auth != "" {
++			return s.rpcCallAuthed(method, params, walletHeader, auth)
++		}
++	}
++	result, err := s.rpcCallAuthed(method, params, walletHeader, conf)
++	if err == nil {
++		return result, nil
++	}
++	// Static credentials failed (unconfigured, or the node runs cookie-only
++	// and rejects them with 401). One retry with the datadir .cookie.
++	if auth := s.cookieAuth(); auth != "" && auth != s.confAuth() {
++		return s.rpcCallAuthed(method, params, walletHeader, auth)
++	}
++	return nil, err
++}
++
++// confAuth returns the configured static credentials (legacycoin.conf
++// rpcuser/rpcpassword), mirrored into LEGACYCOIN_RPC_USER/_PASS. Empty when
++// unconfigured — the node may run cookie-only.
++func (s *Service) confAuth() string {
++	if s.rpcUser == "" {
++		return ""
++	}
++	return s.rpcUser + ":" + s.rpcPass
++}
++
++// cookieAuth returns the "user:pass" pair from the node's datadir .cookie
++// (format __cookie__:salt:pass), re-read whenever the file changes so node
++// restarts that rotate the cookie are picked up. Empty when absent/unreadable.
++func (s *Service) cookieAuth() string {
++	path := filepath.Join(s.dataDir, ".cookie")
++	st, err := os.Stat(path)
++	if err != nil || st.Size() == 0 || st.Size() > 512 {
++		return ""
++	}
++	if s.cookieFile == path && s.cookieModTime.Equal(st.ModTime()) && s.cookieAuthCache != "" {
++		return s.cookieAuthCache
++	}
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		return ""
++	}
++	auth := strings.TrimSpace(string(raw))
++	if !strings.Contains(auth, ":") {
++		return ""
++	}
++	s.cookieFile = path
++	s.cookieModTime = st.ModTime()
++	s.cookieAuthCache = auth
++	return auth
++}
++
++// rpcCallAuthed performs one RPC attempt with a chosen basic-auth pair.
++func (s *Service) rpcCallAuthed(method string, params any, walletHeader, auth string) (any, error) {
+ 	reqBody := map[string]any{"method": method, "params": params, "id": 1}
+ 	body, _ := json.Marshal(reqBody)
+ 	req, _ := http.NewRequest("POST", s.rpcURL, bytes.NewReader(body))
+@@ -102,8 +165,8 @@
+ 	if walletHeader != "" {
+ 		req.Header.Set("X-LegacyCoin-Wallet", walletHeader)
+ 	}
+-	if s.rpcUser != "" {
+-		req.SetBasicAuth(s.rpcUser, s.rpcPass)
++	if auth != "" {
++		req.SetBasicAuth(auth[:strings.Index(auth, ":")], auth[strings.Index(auth, ":")+1:])
+ 	}
+ 	resp, err := http.DefaultClient.Do(req)
+ 	if err != nil {
+@@ -116,7 +179,10 @@
+ 		Error  any `json:"error"`
+ 	}
+ 	if err := json.Unmarshal(respBody, &result); err != nil {
+-		return nil, err
++		// HTTP 401 from a cookie-only node arrives as plain "Unauthorized"
++		// text, not JSON — surface it as an auth error so the caller can
++		// retry with the cookie.
++		return nil, fmt.Errorf("rpc %s: http %d: %s", method, resp.StatusCode, strings.TrimSpace(string(respBody[:min(len(respBody), 120)])))
+ 	}
+ 	if result.Error != nil {
+ 		return nil, fmt.Errorf("%v", result.Error)
+@@ -596,11 +662,85 @@
+ 		s.handleChainEstimate(w, r, chain, rest)
+ 	case "send":
+ 		s.handleChainSend(w, r, chain, rest)
++	case "rpc":
++		s.handleChainRPC(w, r, coin)
+ 	default:
+ 		jsonErr(w, 400, "unknown op "+op)
+ 	}
+ }
+ 
++// ---------------------------------------------------------------------------
++// Raw JSON-RPC pass-through (POST /api/chain/{coin}/rpc)
++//
++// The high-level ops cover the common flows, but the operational scripts
++// (deposit monitor, ledger sync, treasury funding) still need node-level
++// methods the agent does not wrap individually: getaddresstxids,
++// getrawtransaction, gettransaction, sweepallraw, getwalletsummary... Rather
++// than adding an op per method, the node-backed chain exposes a pass-through.
++// Scope guards:
++//   - only the node-backed chain (lbtc) serves it: every other registered
++//     chain is a REST/scan driver with no JSON-RPC surface to proxy;
++//   - X-Api-Key required, because the op can spend (sweepallraw,
++//     sendtoaddress) and, if misused, reach key-export methods;
++//   - credential and lifecycle methods are refused unconditionally.
++// ---------------------------------------------------------------------------
++
++var rpcForbiddenMethods = map[string]bool{
++	"dumpprivkey": true, "dumpprivatekeys": true, "dumpwallet": true,
++	"backupwallet": true, "importprivkey": true, "importwallet": true,
++	"encryptwallet": true, "walletpassphrase": true, "walletpassphrasechange": true,
++	"stop": true,
++}
++
++func (s *Service) handleChainRPC(w http.ResponseWriter, r *http.Request, coin string) {
++	if r.Method != http.MethodPost {
++		jsonErr(w, 405, "rpc requires POST")
++		return
++	}
++	if coin != "lbtc" {
++		jsonErr(w, 404, "rpc pass-through is only served for the node-backed chain (lbtc)")
++		return
++	}
++	if s.apiKey == "" {
++		jsonErr(w, 503, "rpc is disabled: LEGACYCOIN_API_KEY is not configured")
++		return
++	}
++	if r.Header.Get("X-Api-Key") != s.apiKey {
++		jsonErr(w, 401, "missing or invalid X-Api-Key")
++		return
++	}
++	var req struct {
++		Method string `json:"method"`
++		Params []any  `json:"params"`
++		Wallet string `json:"wallet"`
++	}
++	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
++		jsonErr(w, 400, "invalid JSON body")
++		return
++	}
++	method := strings.ToLower(strings.TrimSpace(req.Method))
++	if method == "" {
++		jsonErr(w, 400, "method is required")
++		return
++	}
++	if rpcForbiddenMethods[method] {
++		log.Printf("chain rpc pass-through refused: %s from %s", method, r.RemoteAddr)
++		jsonErr(w, 403, "rpc method is refused by the pass-through policy: "+method)
++		return
++	}
++	params := req.Params
++	if params == nil {
++		params = []any{}
++	}
++	result, err := s.rpcCallOnceWallet(req.Method, params, req.Wallet)
++	if err != nil {
++		jsonErr(w, 502, err.Error())
++		return
++	}
++	log.Printf("chain rpc pass-through: %s wallet=%q", method, req.Wallet)
++	jsonResp(w, 200, map[string]any{"method": req.Method, "wallet": req.Wallet, "result": result})
++}
++
+ func (s *Service) handleChainBalance(w http.ResponseWriter, chain txsvc.Blockchain, address string) {
+ 	bal, err := chain.GetBalance(address)
+ 	if err != nil {
+@@ -793,7 +933,12 @@
+ 
+ 	signer := getEnv("LEGACYCOIN_SIGNER_URL", "http://127.0.0.1:8053")
+ 	hotWallet := getEnv("LEGACYCOIN_HOT_WALLET", "exchange")
+-	svc.chains.Register(txsvc.NewLBTC(svc.rpcURL, svc.rpcUser, svc.rpcPass).SetNodeWallet(hotWallet).SetSignerURL(signer))
++	lbtcChain := txsvc.NewLBTC(svc.rpcURL, svc.rpcUser, svc.rpcPass).SetNodeWallet(hotWallet).SetSignerURL(signer)
++	// The node may run cookie-only (no rpcuser/rpcpassword in legacycoin.conf);
++	// the RPC clients then fall back to the datadir .cookie, re-read on auth
++	// failure so a node restart rotating the cookie needs no agent restart.
++	lbtcChain.SetCookieDir(svc.dataDir)
++	svc.chains.Register(lbtcChain)
+ 	svc.chains.Register(txsvc.NewKaspaRest("KAS", "https://api.kaspa.org").SetSignerURL(signer))
+ 	svc.chains.Register(txsvc.NewKaspaRest("GOR", "https://api.gor.forks.life").SetSignerURL(signer))
+ 	svc.chains.Register(txsvc.NewKaspaRest("BTM", "https://api.btm.forks.life").SetSignerURL(signer))
+@@ -814,14 +959,22 @@
+ 	http.HandleFunc("/api/wallets", svc.handleListWallets)
+ 	http.HandleFunc("/api/chain/", svc.handleChain)
+ 
+-	addr := host + ":" + port
++	addrs := make([]string, 0, 2)
++	for _, h := range strings.Split(host, ",") {
++		if h = strings.TrimSpace(h); h != "" {
++			addrs = append(addrs, h+":"+port)
++		}
++	}
++	if len(addrs) == 0 {
++		log.Fatalf("LEGACYCOIN_HOST=%q yields no listen address", host)
++	}
+ 	fmt.Println("========================================")
+ 	fmt.Println("  legacycoreagent - Wallet API Service")
+ 	fmt.Println("========================================")
+ 	fmt.Printf("  Port:   %s\n", port)
+ 	fmt.Printf("  Host:   %s\n", host)
+ 	fmt.Printf("  Data:   %s\n", dataDir)
+-	fmt.Printf("  Listen: %s\n", addr)
++	fmt.Printf("  Listen: %s\n", strings.Join(addrs, ", "))
+ 	fmt.Println("========================================")
+ 	fmt.Println("  Endpoints:")
+ 	fmt.Println("    POST /api/generate-seed")
+@@ -841,7 +994,16 @@
+ 	fmt.Println("    POST /api/chain/{coin}/send     (requires X-Api-Key)")
+ 	fmt.Println("========================================")
+ 
+-	log.Fatal(http.ListenAndServe(addr, nil))
++	// LEGACYCOIN_HOST may list several addresses (host loopback + the docker
++	// bridge), one listener each; the first failure is fatal.
++	for _, a := range addrs {
++		go func(a string) {
++			if err := http.ListenAndServe(a, nil); err != nil {
++				log.Fatalf("listen %s: %v", a, err)
++			}
++		}(a)
++	}
++	select {}
+ }
+ 
+ func getEnv(key, fallback string) string {

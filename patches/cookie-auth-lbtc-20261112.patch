@@ -1,0 +1,21 @@
+--- /dev/fd/63	2026-11-12 11:29:43.104322721 +0000
++++ /tmp/agent-build/internal/txsvc/lbtc.go	2026-11-12 11:29:10.363888209 +0000
+@@ -57,6 +57,18 @@
+ 	return &cp
+ }
+ 
++// SetCookieDir points the chain's RPC clients at the node datadir holding
++// .cookie, so a cookie-only node (no static rpcuser/rpcpassword in
++// legacycoin.conf) is served: on auth failure the clients re-read the cookie.
++// Must be called before serving traffic.
++func (b *LBTC) SetCookieDir(dir string) *LBTC {
++	b.rpc = b.rpc.WithCookieDir(dir)
++	if b.hotRPC != nil {
++		b.hotRPC = b.hotRPC.WithCookieDir(dir)
++	}
++	return b
++}
++
+ // sendRPC is the client used for wallet-scoped spend/balance RPCs.
+ func (b *LBTC) sendRPC() *RPCClient {
+ 	if b.hotRPC != nil {

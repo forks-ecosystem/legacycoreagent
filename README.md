@@ -72,6 +72,7 @@ through `EnvironmentFile`).
 | `POST /api/wallet/{name}/newaddress` | Derive and return a new address |
 | `GET /api/wallet/{name}/balance` | Wallet balance |
 | `GET /api/wallet/{name}/balances` | Per-address balances |
+| `GET /api/wallet/{name}/listunspent` | Per-name kistunsoent |
 | `GET /api/wallets` | List all wallets |
 
 ### Transaction service (read-only)
@@ -134,6 +135,11 @@ Restore a wallet from an existing mnemonic phrase. Derives the same addresses as
 ```
 
 ## Nginx Reverse Proxy
+
+The wallet API is also reachable through the `server-coin` container (port `8053`,
+source in `/app/server-coin`): `server.mjs` proxies `/api/wallet/*`,
+`/api/wallets` and `/api/chain/*` to the agent at `http://172.17.0.1:8444`
+(override with `LEGACYCOIN_AGENT_URL`).
 
 The panel reaches the agent through nginx. On the server that hosts it, expose
 the agent under the `/sv/wallet-api/` prefix inside the `server { ... }` block:
